@@ -1,0 +1,6 @@
+<?xml version="1.0"?>
+<output name="127.0.0.1" type="FLIGHTGEAR" port="5550" protocol="udp" rate="60">
+    <position> ON </position>
+    <attitude> ON </attitude>
+    <velocities> ON </velocities>
+</output>
