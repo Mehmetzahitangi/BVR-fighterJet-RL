@@ -7,7 +7,7 @@ Bu proje, F-16 savaş uçaklarının uçuş dinamiklerini **JSBSim** açık kayn
 Proje, ajanın sıfır bilgiden Görüş Ötesi Çatışma (BVR) yeteneğine ulaşması için çok aşamalı bir "Müfredatlı Öğrenme" (Curriculum Learning) konseptiyle tasarlanmıştır.
 
 * **[X] Faz 1: Aerodinamik Hayatta Kalma (Trim & Survival)** - *Tamamlandı*
-* **[X] Faz 2: Seyrüsefer ve Komut Takibi (Navigation & Command Following)
+* **[X] Faz 2: Seyrüsefer ve Komut Takibi (Navigation & Command Following)*
 * [ ] Faz 3: Güvenli Otonomi ve Model Tabanlı Zeka (Koopman/DMD & CBF)
 * [ ] Faz 4: Görüş Ötesi Çatışma (Defansif BVR)
 * [ ] Faz 5: Taktiksel İt Dalaşı ve Filo Koordinasyonu (MARL & Self-Play)
