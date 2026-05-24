@@ -15,14 +15,14 @@ from core.jsbsim_utils import setup_flightgear_xml
 print("Test Ortamı Başlatılıyor...")
 
 
-USE_FLIGHTGEAR = True  # Canlı 3D izlemek için True (FlightGear açık olmalı)
+USE_FLIGHTGEAR = False  # Canlı 3D izlemek için True (FlightGear açık olmalı)
 USE_TACVIEW = True     # Uçuş bittiğinde .acmi dosyası oluşturmak için True
 
 
-TEST_STEP = 700000 
+TEST_STEP = 1800000  
 
-MODEL_PATH = f"./fighter_checkpoints/phase2/sac_fighter_phase2_final.zip"
-VEC_PATH = f"./fighter_checkpoints/phase2/sac_fighter_phase2_final_vec_normalize.pkl"
+MODEL_PATH = None #f"./fighter_checkpoints/phase2_advanced/sac_f16_phase2_Advanced_{TEST_STEP}_steps.zip"
+VEC_PATH = None #f"./fighter_checkpoints/phase2_advanced/sac_f16_phase2_Advanced_{TEST_STEP}_steps_vec_normalize.pkl"
 TACVIEW_FILE = f"phase2_flight_{TEST_STEP}_steps.acmi"
 
 
@@ -63,7 +63,7 @@ obs = norm_env.reset()
 print(f"{TEST_STEP}. Adım Ajanı Kokpitte! Harekât Başlıyor...")
 
 # Yaklaşık 1 dakikalık uçuş (60 FPS * 60 Saniye = 3600 adım)
-for step in range(3600):
+for step in range(7200):
     # deterministic=True : Ajan zar atmaz, öğrendiği en iyi hamleyi yapar
     action, _ = model.predict(obs, deterministic=True)
     obs, reward, done, info = norm_env.step(action)
@@ -72,7 +72,7 @@ for step in range(3600):
     fdm = norm_env.venv.envs[0].fdm
     
     # Hedef verisini info sözlüğünden alıyoruz
-    hedef_irtifa_ft = info[0]["hedef_irtifa"]
+    hedef_irtifa_ft = info[0]["hedef_irtifa"] 
     hedef_mach = info[0]["hedef_mach"]
     
 
@@ -99,7 +99,6 @@ for step in range(3600):
 
 
     # FLIGHTGEAR CANLI GÖRÜNTÜSÜ İÇİN KISITLAMA
-
     if USE_FLIGHTGEAR:
         time.sleep(1.0 / 60.0)
         
