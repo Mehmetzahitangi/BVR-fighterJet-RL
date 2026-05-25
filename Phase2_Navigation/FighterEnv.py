@@ -69,27 +69,26 @@ class FighterEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         
-        #Fizik Motorunu Sıfırla ve Uçağı Havada Başlat (Airborne Initialization)
+        # Fizik Motorunu Sıfırla ve Uçağı Havada Başlat (Initialization)
         self.fdm.reset_to_initial_conditions(0)
 
-        # --- RASTGELE İRTİFA SEÇİMİ ---
+        # RASTGELE İRTİFA SEÇİMİ 
         self.initial_altitude = self.np_random.uniform(2000.0, 40000.0)
 
-        # --- İRTİFAYA BAĞLI HIZ  ---
+        #  İRTİFAYA BAĞLI HIZ  
         min_initial_mach, max_initial_mach = self.get_mach_limits(self.initial_altitude)
         self.initial_mach = self.np_random.uniform(min_initial_mach, max_initial_mach)
 
-        # --- HEDEF İRTİFA (Maks +/- 8000 ft Tırmanış/Dalış) ---
-        # Hedefi 8000 feet uzağa koyup ajanı korkutmak yerine,
-        # şimdilik sadece 2000 feet aşağısına veya yukarısına koyuyoruz.
-        target_delta_altitude = self.np_random.uniform(-2000.0, 2000.0) # (-2000.0, 2000.0)
+        # HEDEF İRTİFA (Maks +/- 8000 ft Tırmanış/Dalış) 
+        # Hedefi ilk olarak +/- 2000 feet arasında seçerek eğitim yapıyoruz. Ajan bunu öğrendikten sonra aynı süreci +/- 5000 feet arasında yaparak daha zorlu hedeflere geçiyoruz. 
+        # Son olarak da tam +/- 8000 feet'e kadar hedef seçerek ajanı gerçek sınırlarına kadar zorluyoruz.
+        target_delta_altitude = self.np_random.uniform(-8000.0, 8000.0)
         self.target_altitude = self.initial_altitude + target_delta_altitude
         self.target_altitude = max(2000.0, min(40000.0, self.target_altitude))
 
 
-        # ==============================================================
-        # YENİ: DİNAMİK GÖREV SÜRESİ HESAPLAMASI
-        # ==============================================================
+
+        # DİNAMİK GÖREV SÜRESİ HESAPLAMASI
         # Uçağa toparlanması ve hızı ayarlaması için banko 60 saniye avans veriyoruz.
         # İrtifa değiştirmesi gereken her 1000 feet için de ekstra 20 saniye ekliyoruz.
         ekstra_saniye = (abs(target_delta_altitude) / 1000.0) * 20.0
@@ -99,18 +98,15 @@ class FighterEnv(gym.Env):
         self.max_steps = int(toplam_saniye * 60) 
         # Örneğin: 2000 ft gidecekse 90 saniye (5400 adım) süresi olur.
         # İleride 8000 ft hedefine geçtiğimizde 180 saniye (10800 adım) süresi olur.
-        # ==============================================================
 
-        # --- HEDEF İRTİFAYA BAĞLI HEDEF HIZ (Kritik) ---
+        #  HEDEF İRTİFAYA BAĞLI HEDEF HIZ (Kritik) 
         # Ajanı 40 bin feet'e gönderip, orada Mach 0.4'te uç (Stall ol) diyemeyiz
         min_target_mach, max_target_mach = self.get_mach_limits(self.target_altitude)
 
-        # Ajanı zorlamamak (Sweet Spot'ta tutmak) için hedefleri limitlerin biraz daha içinden seçelim
-        #safe_min_target = min_target_mach + 0.1
         #safe_max_target = max_target_mach - 0.2
 
-        # Ajanı çok zorlamamak için hedefi mevcut hızına yakın (+/- 0.1) tutalım, 
-        # AMA aerodinamik sınırların (min/max_target_mach) dışına asla çıkmasına izin vermeyelim!
+        # Ajanı çok zorlamamak için hedefi mevcut hızına yakın (+/- 0.1) tutalım 
+        # Ama aerodinamik sınırların (min/max_target_mach) dışına asla çıkmasına izin vermiyoruz
         safe_min_target_mach = max(min_target_mach, self.initial_mach - 0.1)
         safe_max_target_mach = min(max_target_mach, self.initial_mach + 0.1)
 
@@ -156,8 +152,7 @@ class FighterEnv(gym.Env):
             self.fdm['fcs/elevator-cmd-norm'] = pitch_cmd
             self.fdm['fcs/aileron-cmd-norm'] = roll_cmd
             
-            # KOORDİNELİ DÖNÜŞ MATEMATİĞİ (Adverse Yaw Engelleme)
-            # Gerçek bir F-16'nın uçuş bilgisayarı gibi davranıyoruz.
+            # KOORDİNELİ DÖNÜŞ MATEMATİĞİ (Adverse Yaw Engelleme). Gerçek bir F-16'nın uçuş bilgisayarı gibi davranması için.
             # Uçak yattığında (roll), havada kaymaması için rudder'ı (kuyruk dümeni) 
             # yatış yönüne orantılı olarak (%30) otomatik eziyoruz. 
             self.fdm['fcs/rudder-cmd-norm'] = roll_cmd * 0.3
@@ -178,7 +173,6 @@ class FighterEnv(gym.Env):
             pitch = obs[7]
 
 
-            # ÖDÜL MİMARİSİ (Faz 2: Hedef Takibi)
             reward = 0.0
             terminated = False # Oyun fiziksel ölümle mi bitti?
             truncated = False  # Zaman/Adım sınırı mı doldu?
@@ -219,33 +213,29 @@ class FighterEnv(gym.Env):
             # Eğer uçak dinamik stall sınırının altına düşerse (çok ufak bir toleransla)
             is_stall = (mevcut_hiz < anlik_min_hiz)
 
-            # ÖLÜM SINIRLARI (Exploit Kırıcı & Gerçekçi Zarf)
+            # ÖLÜM SINIRLARI (Exploit Kırıcı & Gerçekçi)
             # İrtifa limitleri 1500 (yere çakılma payı) ve 45000 (uzaya çıkma payı) olarak esnetildi.
             # Ajanı dinamik stall yüzünden anında ÖLDÜRMÜYORUZ. 
-            # Sadece hız 0.25'in altına düşerse (gerçekten taş gibi düşüyorsa) öldürüyoruz
-            if mevcut_irtifa < 1500.0 or mevcut_irtifa > 45000.0 or mevcut_hiz < 0.25:#(is_stall and self.current_step > 150):
+            # Sadece hız 0.25'in altına düşerse öldürüyoruz
+            if mevcut_irtifa < 1500.0 or mevcut_irtifa > 45000.0 or mevcut_hiz < 0.25: #(is_stall and self.current_step > 150):
                 # İNTİHAR CEZASI ARTIRILDI (-7000'e)
                 reward = -7000.0
                 terminated = True
             else:
 
-                # YUMUŞAK STALL CEZASI (Öldürme, Süründür!)
+                # YUMUŞAK STALL CEZASI (Öldürme, Cezalandır)
                 if is_stall:
                     # Ajan o irtifanın stall sınırındaysa, her adımda canı yanar.
                     # Bu sayede ölmez ama "Gaz açmam lazım" demeyi öğrenir.
                     reward -= 20.0
 
 
-                # ==============================================================
+
                 # 2. DİSİPLİN (Ilımlı Duruş ve YENİ VSI - Dikey Hız Cezası)
-                # ==============================================================
-                
                 # YENİ: VSI (Dikey Hız) Cezası. Uçak roket gibi fırlamasın veya taş gibi dalmasın
                 # obs dizisindeki 8. indeks 'dikey_hiz'ın cezasıdır. 
                 reward -= abs(obs[8]) * 0.01
 
-
-                # 2. DİSİPLİN (Ilımlı Duruş Cezası - Karesel iptal edildi)
                 # Fırıldaklık yapmasını ve burnunu gereksiz dikmesini engeller.
                 # GERÇEKÇİ ORYANTASYON CEZASI (Split-S'e izin verir, sürekli ters uçmayı engeller)
                 # Karesel değil doğrusal ceza. Uçak anlık ters dönebilir ama düz uçuş her zaman daha kârlıdır.
@@ -261,23 +251,21 @@ class FighterEnv(gym.Env):
                 reward -= (abs(delta_hiz) * 1.2)
 
 
-                # --- POTANSİYEL TEMELLİ ÖDÜL (Durgunluk Kırıcı) ---
+                #  POTANSİYEL TEMELLİ ÖDÜL (Durgunluk Kırıcı) 
                 # Mevcut mesafe hesaplama
                 current_dist = abs(delta_irtifa) + (abs(delta_hiz) * 5000) 
                 
                 # Eğer mesafe azalıyorsa progress > 0 olur, artıyorsa progress < 0
                 if self.prev_dist is not None:
                     progress = self.prev_dist - current_dist
-                    reward += progress * 0.01  # İlerlemeyi teşvik ediyoruz (Çok büyük değil, sadece küçük bir teşvik)
+                    reward += progress * 0.01  # İlerlemeyi teşvik ediyoruz (Çok büyük değil, küçük bir teşvik)
                 
                 self.prev_dist = current_dist
 
-                # ==============================================================
                 # ZAMAN VE TEMBELLİK CEZASI (Living Penalty)
-                # ==============================================================
                 # Ajan havada boş boş süzülmesin, görevi bir an önce bitirsin diye
                 # her adımda (saniyenin 1/60'ında) ufak bir zaman vergisi kesiyoruz.
-                # 60 adım = 1 saniye = -3.0 puan. (Ajan hızlı olmaya mecbur kalacak!)
+                # 60 adım = 1 saniye = -3.0 puan. (Ajan hızlı olmaya mecbur kalacak)
                 reward -= 0.05
 
                 # 4. KADEMELİ Curriculum Target - Local Optimal Kırıcı
@@ -295,8 +283,26 @@ class FighterEnv(gym.Env):
                     # Aşama 3: İĞNE DELİĞİ (Kusursuz Trim - Devasa Ödül)
                     reward += 150.0
 
-            # GÜVENLİK SİGORTASI (Vardiya Sonu - Truncated)
-            # Ajan cezalandırılmaz, sadece simülasyon çok uzadığı için (100 saniye) nazikçe sıfırlanır.
+                    """Daha fazla geliştirmek istersek:
+                    # Aşama 3: İĞNE DELİĞİ (Kusursuz Trim - Hassasiyet Çarpanı)
+                    # Artık 500 feet'in içine girmek yetmiyorsa, merkeze inmeyi ne kadar iyi yaptığına göre ödül verelim.
+                    
+                    # 1. Merkeze Yakınlık Yüzdesi (0.0 ile 1.0 arası değer üretir)
+                    # 500 ft'de %0 (0.0), 0 ft'de %100 (1.0) hassasiyet.
+                    alt_precision = 1.0 - (abs(delta_irtifa) / 500.0) 
+                    
+                    # 0.1 Mach'ta %0 (0.0), 0 Mach'ta %100 (1.0) hassasiyet.
+                    spd_precision = 1.0 - (abs(delta_hiz) / 0.1)      
+                    
+                    # 2. Ağırlıklı Hassasiyet Çarpanı
+                    # İrtifayı tutturmak uçağın asıl görevi olduğu için İrtifaya %70, Hıza %30 önem veriyoruz.
+                    precision_multiplier = (alt_precision * 0.7) + (spd_precision * 0.3)
+                    
+                    # 3. Dinamik Ödül Dağıtımı
+                    # Merkeze tam oturursa +150 alır, sınırda gezinirse +5, +10 gibi komik rakamlar alır.
+                    reward += 150.0 * precision_multiplier
+                    """
+
             if self.current_step >= self.max_steps:
                 truncated = True
                 # Görevi bitiremediği için ciddi ama ölümcül olmayan bir Görev İptal Cezası yiyor

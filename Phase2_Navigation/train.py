@@ -12,9 +12,6 @@ from FighterEnv import FighterEnv
 from core.callbacks import SaveVecNormalizeCallback
 
 if __name__ == "__main__":
-    #print("FAZ 2: Seyrüsefer ve Komut Takibi Eğitimi Başlıyor...")
-    print("FAZ 2 Advanced: DİNAMİK İNTİKAL VE ENERJİ YÖNETİMİ Başlıyor...")
-
     models_dir = "./fighter_checkpoints/phase2_completed/"
     logs_dir = "./fighter_tensorboard/phase2_completed/"
     os.makedirs(models_dir, exist_ok=True)
@@ -28,9 +25,9 @@ if __name__ == "__main__":
     monitored_env = Monitor(env)
     vec_env = DummyVecEnv([lambda: monitored_env])
 
-    CHECKPOINT_STEP = 1650000
-    LOAD_MODEL_PATH = None #f"./fighter_checkpoints/phase2_advanced/sac_f16_phase2_Advanced_{CHECKPOINT_STEP}_steps.zip"
-    LOAD_VEC_PATH = None #f"./fighter_checkpoints/phase2_advanced/sac_f16_phase2_Advanced_{CHECKPOINT_STEP}_steps_vec_normalize.pkl"
+    CHECKPOINT_STEP = 450000
+    LOAD_MODEL_PATH = f"./fighter_checkpoints/phase2_completed/sac_f16_phase2_completed_450000_steps.zip"
+    LOAD_VEC_PATH = f"./fighter_checkpoints/phase2_completed/sac_f16_phase2_completed_450000_steps_vec_normalize.pkl"
 
 
     if LOAD_VEC_PATH and os.path.exists(LOAD_VEC_PATH):
@@ -87,7 +84,7 @@ if __name__ == "__main__":
             log_interval=4,
             callback=callbacks,
             reset_num_timesteps=False,
-            tb_log_name="Phase2_completed_version"
+            tb_log_name="Phase2_completed_450Kversion"
         )
     except KeyboardInterrupt:
         print("\n Eğitim  durduruldu. Son veriler kaydediliyor...")

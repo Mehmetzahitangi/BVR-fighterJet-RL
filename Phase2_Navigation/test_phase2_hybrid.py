@@ -4,7 +4,7 @@ import time
 import math
 import numpy as np
 
-# 'core' modüllerini bulabilmesi için
+
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from stable_baselines3 import SAC
@@ -15,14 +15,14 @@ from core.jsbsim_utils import setup_flightgear_xml
 print("Test Ortamı Başlatılıyor...")
 
 
-USE_FLIGHTGEAR = False  # Canlı 3D izlemek için True (FlightGear açık olmalı)
+USE_FLIGHTGEAR = True  # Canlı 3D izlemek için True (FlightGear açık olmalı)
 USE_TACVIEW = True     # Uçuş bittiğinde .acmi dosyası oluşturmak için True
 
 
 TEST_STEP = 1800000  
 
-MODEL_PATH = None #f"./fighter_checkpoints/phase2_advanced/sac_f16_phase2_Advanced_{TEST_STEP}_steps.zip"
-VEC_PATH = None #f"./fighter_checkpoints/phase2_advanced/sac_f16_phase2_Advanced_{TEST_STEP}_steps_vec_normalize.pkl"
+MODEL_PATH =  f"./fighter_checkpoints/phase2_completed/sac_f16_phase2_completed_{TEST_STEP}_steps.zip" 
+VEC_PATH =  f"./fighter_checkpoints/phase2_completed/sac_f16_phase2_completed_{TEST_STEP}_steps_vec_normalize.pkl"
 TACVIEW_FILE = f"phase2_flight_{TEST_STEP}_steps.acmi"
 
 
@@ -34,7 +34,7 @@ if USE_FLIGHTGEAR:
 
 env = DummyVecEnv([lambda: env_raw])
 
-# Normalize istatistiklerini yükle ve GÜNCELLEMEYİ KAPAT (Test Modu)
+# Normalize istatistiklerini yükle ve GÜNCELLEMEYİ KAPAT 
 if os.path.exists(VEC_PATH):
     norm_env = VecNormalize.load(VEC_PATH, env)
     norm_env.training = False
@@ -60,10 +60,10 @@ if USE_TACVIEW:
 # TEST DÖNGÜSÜ
 
 obs = norm_env.reset()
-print(f"{TEST_STEP}. Adım Ajanı Kokpitte! Harekât Başlıyor...")
+print(f"{TEST_STEP}. Adım Ajanı Kullanılıyor! Uçuş Başlıyor...")
 
 # Yaklaşık 1 dakikalık uçuş (60 FPS * 60 Saniye = 3600 adım)
-for step in range(7200):
+for step in range(18000):
     # deterministic=True : Ajan zar atmaz, öğrendiği en iyi hamleyi yapar
     action, _ = model.predict(obs, deterministic=True)
     obs, reward, done, info = norm_env.step(action)
@@ -77,7 +77,6 @@ for step in range(7200):
     
 
     # TACVIEW VERİ YAZIMI
-
     if USE_TACVIEW:
         t = step * (1.0 / 60.0)
         lat = fdm['position/lat-gc-deg']
@@ -98,11 +97,10 @@ for step in range(7200):
         acmi.write(f"202,T={lon}|{lat}|{hedef_alt_m}|0|0|0,Type=Ground+Static,Name=HEDEF_{int(hedef_irtifa_ft)}ft,Color=Red\n")
 
 
-    # FLIGHTGEAR CANLI GÖRÜNTÜSÜ İÇİN KISITLAMA
+    # CANLI GÖRÜNTÜ İÇİN KISITLAMA
     if USE_FLIGHTGEAR:
         time.sleep(1.0 / 60.0)
         
-    # Terminale canlı log bas
     if step % 30 == 0:
         mevcut_irtifa = fdm['position/h-sl-ft']
         mevcut_hiz = fdm['velocities/mach']
