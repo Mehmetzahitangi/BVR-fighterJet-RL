@@ -236,10 +236,26 @@ class FighterEnv(gym.Env):
                 # obs dizisindeki 8. indeks 'dikey_hiz'ın cezasıdır. 
                 reward -= abs(obs[8]) * 0.01
 
+
+                #  DİSİPLİN VE ORYANTASYON (Sürekli Ters Uçuş Engellemek için Gerçekçi Oryantasyon Cezası)
+                # Temel Duruş Cezası (Normal Uçuş İçin Ufak Vergi)
+                oryantasyon_cezasi = (abs(roll) * 1.5) #+ (abs(pitch) * 0.5)
+
+                # YENİ: TERS UÇUŞ VE YAN UÇUŞ (KNIFE-EDGE) İÇİN AĞIR CEZA
+                # Roll açısı pi/2'yi (90 dereceyi) geçerse uçak yan dönmüş veya ters dönmüş demektir.
+                # Ajan anlık Split-S manevrası yapabilir ama bu pozisyonda uzun süre kalırsa puanları erir!
+                if abs(roll) > (math.pi / 2.0):
+                    # 90 dereceyi geçen her radyan için katlanarak artan acımasız ceza
+                    ters_ucus_cezasi = (abs(roll) - (math.pi / 2.0)) * 10.0
+                    oryantasyon_cezasi += ters_ucus_cezasi
+
+                reward -= (oryantasyon_cezasi)  # Toplam oryantasyon cezasını ödülden düşüyoruz
+
+
                 # Fırıldaklık yapmasını ve burnunu gereksiz dikmesini engeller.
                 # GERÇEKÇİ ORYANTASYON CEZASI (Split-S'e izin verir, sürekli ters uçmayı engeller)
                 # Karesel değil doğrusal ceza. Uçak anlık ters dönebilir ama düz uçuş her zaman daha kârlıdır.
-                reward -=  (abs(roll) * 1.5) + (abs(pitch) * 0.5)
+                #reward -=  (abs(roll) * 1.5) + (abs(pitch) * 0.5)
                 #reward -= (abs(roll) * 5.0) + (abs(pitch) * 0.1)
 
                 # 3. DİNAMİK HUNİ (Esnek Cezalar)
@@ -281,9 +297,9 @@ class FighterEnv(gym.Env):
 
                 if abs(delta_irtifa) < 500.0 and abs(delta_hiz) < 0.1:
                     # Aşama 3: İĞNE DELİĞİ (Kusursuz Trim - Devasa Ödül)
-                    reward += 150.0
+                    #reward += 150.0
 
-                    """Daha fazla geliştirmek istersek:
+                    #Daha fazla geliştirmek istersek:
                     # Aşama 3: İĞNE DELİĞİ (Kusursuz Trim - Hassasiyet Çarpanı)
                     # Artık 500 feet'in içine girmek yetmiyorsa, merkeze inmeyi ne kadar iyi yaptığına göre ödül verelim.
                     
@@ -301,7 +317,7 @@ class FighterEnv(gym.Env):
                     # 3. Dinamik Ödül Dağıtımı
                     # Merkeze tam oturursa +150 alır, sınırda gezinirse +5, +10 gibi komik rakamlar alır.
                     reward += 150.0 * precision_multiplier
-                    """
+                    
 
             if self.current_step >= self.max_steps:
                 truncated = True
