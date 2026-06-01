@@ -234,12 +234,24 @@ class FighterEnv(gym.Env):
                 # 2. DİSİPLİN (Ilımlı Duruş ve YENİ VSI - Dikey Hız Cezası)
                 # YENİ: VSI (Dikey Hız) Cezası. Uçak roket gibi fırlamasın veya taş gibi dalmasın
                 # obs dizisindeki 8. indeks 'dikey_hiz'ın cezasıdır. 
-                reward -= abs(obs[8]) * 0.01
+                reward -= abs(obs[8]) * 0.002 # Dikey hızın her 500 ft/dk sapması için 1 puan ceza (0.002 çarpanı ile)
+                # VSI (Dikey Hız) Cezası 5 kat azaltıldı (0.01 -> 0.002)
+                # Uçak artık tırmanmaktan veya dalmaktan korkmuyor, sadece aşırı savrulması yasak.
 
 
                 #  DİSİPLİN VE ORYANTASYON (Sürekli Ters Uçuş Engellemek için Gerçekçi Oryantasyon Cezası)
                 # Temel Duruş Cezası (Normal Uçuş İçin Ufak Vergi)
                 oryantasyon_cezasi = (abs(roll) * 1.5) #+ (abs(pitch) * 0.5)
+                # Uçak tırmanmak için burnunu özgürce dikebilir. 
+                # Sadece kanatlarını ufka paralel tutması (Roll) için ceza veriyoruz.
+
+                # YENİ: PITCH İÇİN "ÖLÜ BÖLGE" (Deadband)
+                # 0.26 radyan yaklaşık 15 derece yapar. 
+                # Ajan 15 dereceye kadar burnunu serbestçe kullanabilir (Ceza = 0).
+                # Ancak sınır aşılırsa, aştığı miktar kadar katlanarak ceza yer!
+                #if abs(pitch) > 0.26:
+                #    oryantasyon_cezasi += (abs(pitch) - 0.26) * 3.0
+
 
                 # YENİ: TERS UÇUŞ VE YAN UÇUŞ (KNIFE-EDGE) İÇİN AĞIR CEZA
                 # Roll açısı pi/2'yi (90 dereceyi) geçerse uçak yan dönmüş veya ters dönmüş demektir.
@@ -264,7 +276,9 @@ class FighterEnv(gym.Env):
 
                 # ENERJİ TAKASI İZNİ (Kritik): Hız cezası 5.0'dan 1.5'e düşürüldü.
                 # Artık tırmanırken hız kaybederse panikleyip dalışa geçmeyecek
-                reward -= (abs(delta_hiz) * 1.2)
+                reward -= (abs(delta_hiz) * 0.8)
+                # ENERJİ TAKASI İZNİ: Hız cezası yumuşatıldı (1.2 -> 0.8)
+                # Tırmanırken kaybettiği hız yüzünden paniğe kapılıp dalışa geçmeyecek.
 
 
                 #  POTANSİYEL TEMELLİ ÖDÜL (Durgunluk Kırıcı) 

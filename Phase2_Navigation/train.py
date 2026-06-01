@@ -8,16 +8,17 @@ from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.callbacks import CheckpointCallback
-from FighterEnv import FighterEnv
+#from FighterEnv import FighterEnv
+from FighterEnv_Vanilla import FighterEnv as VanillaFighterEnv
 from core.callbacks import SaveVecNormalizeCallback
 
 if __name__ == "__main__":
-    models_dir = "./fighter_checkpoints/phase2_completed/"
-    logs_dir = "./fighter_tensorboard/phase2_completed/"
+    models_dir = "./fighter_checkpoints/phase2_vanilla/"
+    logs_dir = "./fighter_tensorboard/phase2_vanilla/"
     os.makedirs(models_dir, exist_ok=True)
     os.makedirs(logs_dir, exist_ok=True)
 
-    env = FighterEnv()
+    env = VanillaFighterEnv()
 
     check_env(env)
     print("Çevre Gymnasium standartlarına %100 uygun.")
@@ -25,9 +26,9 @@ if __name__ == "__main__":
     monitored_env = Monitor(env)
     vec_env = DummyVecEnv([lambda: monitored_env])
 
-    CHECKPOINT_STEP = 450000
-    LOAD_MODEL_PATH = f"./fighter_checkpoints/phase2_completed/sac_f16_phase2_completed_450000_steps.zip"
-    LOAD_VEC_PATH = f"./fighter_checkpoints/phase2_completed/sac_f16_phase2_completed_450000_steps_vec_normalize.pkl"
+    CHECKPOINT_STEP = 2950000
+    LOAD_MODEL_PATH = None #f"./fighter_checkpoints/phase2_completed/sac_f16_phase2_completed_2950000_steps.zip"
+    LOAD_VEC_PATH = None #f"./fighter_checkpoints/phase2_completed/sac_f16_phase2_completed_2950000_steps_vec_normalize.pkl"
 
 
     if LOAD_VEC_PATH and os.path.exists(LOAD_VEC_PATH):
@@ -48,7 +49,7 @@ if __name__ == "__main__":
             model = SAC.load(LOAD_MODEL_PATH, env=norm_env, device="cuda", tensorboard_log=logs_dir)
             print("Eski tecrübeler, yeni 'Auto' ajana aktarıldı.")
     else:
-        print("Model bulunamadı, ajan sıfırdan öğreniyor (Yeni 8 Sensörlü/Girdili Mimari).")
+        print("Model bulunamadı, ajan sıfırdan öğreniyor (Yeni 11 Sensörlü/Girdili Mimari).")
         model = SAC(
             policy="MlpPolicy",
             env=norm_env, 
@@ -65,14 +66,14 @@ if __name__ == "__main__":
     checkpoint_callback = CheckpointCallback(
         save_freq=50000, 
         save_path=models_dir,
-        name_prefix='sac_f16_phase2_completed'        
+        name_prefix='sac_f16_phase2_vanilla'        
     )
 
     # İstatistikleri (.pkl) kaydeder
     vec_normalize_callback = SaveVecNormalizeCallback(
         save_freq=50000,
         save_path=models_dir,
-        name_prefix='sac_f16_phase2_completed'
+        name_prefix='sac_f16_phase2_vanilla'
     )
 
     callbacks = [checkpoint_callback, vec_normalize_callback]
@@ -80,17 +81,17 @@ if __name__ == "__main__":
     print("Eğitim başlıyor...")
     try:
         model.learn(
-            total_timesteps=2000000,
+            total_timesteps=3000000,
             log_interval=4,
             callback=callbacks,
             reset_num_timesteps=False,
-            tb_log_name="Phase2_completed_450Kversion"
+            tb_log_name="Phase2_Vanilla_SAC"
         )
     except KeyboardInterrupt:
         print("\n Eğitim  durduruldu. Son veriler kaydediliyor...")
 
     print("Eğitim tamamlandı/durduruldu. Son veriler kaydediliyor...")
-    model.save(f"{models_dir}/sac_f16_fighter_phase2_completed_final.zip")
-    norm_env.save(f"{models_dir}/sac_f16_fighter_phase2_completed_final_vec_normalize.pkl")
+    model.save(f"{models_dir}/sac_f16_fighter_phase2_vanilla_final.zip")
+    norm_env.save(f"{models_dir}/sac_f16_fighter_phase2_vanilla_final_vec_normalize.pkl")
 
     print("Faz 2 İşlemi Başarıyla Tamamlandı!")
