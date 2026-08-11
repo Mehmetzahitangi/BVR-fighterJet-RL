@@ -22,7 +22,11 @@ class ReplayBuffer:
         self.As = np.zeros((capacity, state_dim, state_dim), dtype=np.float32)
         self.Bs = np.zeros((capacity, state_dim, action_dim), dtype=np.float32)
 
-    def push(self, state, action, reward, next_state, done, A, B):
+        # Kalkan o adımda aktif mi? (0 = kalkan kapalı, 1 = kalkan açık)
+        # Kalkan kapalıyken A/B sıfır matris olur; update'te batch bölünür.
+        self.shield_oks = np.zeros((capacity, 1), dtype=np.float32)
+
+    def push(self, state, action, reward, next_state, done, A, B, shield_ok=0.0):
         """ Yeni bir deneyimi hafızaya yazar (Eskilerin üzerine yazarak / FIFO) """
         self.states[self.ptr] = state
         self.actions[self.ptr] = action
@@ -32,6 +36,7 @@ class ReplayBuffer:
         
         self.As[self.ptr] = A
         self.Bs[self.ptr] = B
+        self.shield_oks[self.ptr] = shield_ok
         
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
@@ -47,7 +52,8 @@ class ReplayBuffer:
             torch.FloatTensor(self.next_states[ind]),
             torch.FloatTensor(self.dones[ind]),
             torch.FloatTensor(self.As[ind]),  # Kalkanın gradient hesabı için A matrisleri
-            torch.FloatTensor(self.Bs[ind])   # Kalkanın gradient hesabı için B matrisleri
+            torch.FloatTensor(self.Bs[ind]),  # Kalkanın gradient hesabı için B matrisleri
+            torch.FloatTensor(self.shield_oks[ind]) # Kalkanın aktif olduğu adımlar
         )
 
     def __len__(self):

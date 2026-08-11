@@ -4,7 +4,8 @@ import cvxpy as cp
 from cvxpylayers.torch import CvxpyLayer
 
 class SafeActor(nn.Module):
-    def __init__(self, state_dim, action_dim):
+    # num_constraints: Uçağa koyduğumuz sınır sayısı (Örn: Pitch ve Roll için 2)
+    def __init__(self, state_dim, action_dim, num_constraints=4):
         super(SafeActor, self).__init__()
         
         # 1. Klasik SAC Sinir Ağı (Ameliyat Kodumuzla %100 Uyumlu Katmanlar)
@@ -17,47 +18,76 @@ class SafeActor(nn.Module):
             nn.Tanh() # Ham aksiyonu -1 ile 1 arasına sıkıştır
         )
         
-        # 2. CBF PyTorch Katmanı
-        self.cbf_layer = self._setup_differentiable_cbf(action_dim)
+        # 2. GERÇEK CBF KALKANI KATMANI
+        self.cbf_layer = self._setup_differentiable_cbf(action_dim, num_constraints)
 
-    def _setup_differentiable_cbf(self, action_dim):
-        """ cvxpy problemini Türevlenebilir (Differentiable) PyTorch katmanına çevirir """
+    def _setup_differentiable_cbf(self, action_dim, num_constraints):
+        """ Sahte limitler silindi! Yerine Gerçek CBF Matrisleri (CB ve limit) bağlandı. """
         u_rl = cp.Parameter(action_dim)
-        limit = cp.Parameter(action_dim)
+        CB_param = cp.Parameter((num_constraints, action_dim)) # C_safe @ B Matrisi
+        limit_param = cp.Parameter(num_constraints)          # Dinamik Limit (İvme+Mesafe)
         
         u_safe = cp.Variable(action_dim)
+        slack = cp.Variable(num_constraints)  # DMD kestirimi gürültülüyken problem hiç infeasible olmasın
         
-        # Amaç: Ajanın komutundan mümkün olduğunca az sap
-        objective = cp.Minimize(cp.sum_squares(u_safe - u_rl))
+        # Amaç: Ajanın komutundan mümkün olduğunca az sap (slack cezasi 100.0)
+        objective = cp.Minimize(cp.sum_squares(u_safe - u_rl) + 100.0 * cp.sum(slack))
         
-        # Kısıtlar: Hem JSBSim fiziksel limitleri hem de CBF dinamik limiti
-        constraints = [u_safe <= limit, u_safe >= -1.0, u_safe <= 1.0] 
+        # GERÇEK MATEMATİKSEL KISITLAR (yumuşak CBF: infeasible durumda slack devreye girer,
+        # feasible iken slack=0 ve davranış sert kısıtla birebir aynıdır)
+        constraints = [
+            CB_param @ u_safe <= limit_param + slack, # Gerçek Aerodinamik Zarf Sınırı
+            slack >= 0.0,
+            u_safe >= -1.0, 
+            u_safe <= 1.0
+        ] 
         
         prob = cp.Problem(objective, constraints)
-        return CvxpyLayer(prob, parameters=[u_rl, limit], variables=[u_safe])
+        # cvxpylayers, PyTorch'tan gelen batched (yığın) tensörleri otomatik işler
+        return CvxpyLayer(prob, parameters=[u_rl, CB_param, limit_param], variables=[u_safe, slack])
 
-    def forward(self, state, A=None, B=None):
+    def forward(self, state, A=None, B=None, C_safe=None, d_safe=None, gamma=0.1):
         """ 
-        state: 14 Boyutlu Gözlem Uzayı
-        A, B: DMD'den gelen aerodinamik matrisler
+        Artık sadece A ve B yetmez, sınır matrislerini (C_safe, d_safe) de istiyoruz!
         """
-        # 1. Ağ ham komutu üretir (u_rl)
         raw_action = self.net(state)
-        
-        # Standart SAC'da log_prob hesaplanır. Uyum sorunu çıkmasın diye
-        # (Tuple Unpacking hatasını engellemek için) boş bir tensör döndürüyoruz.
         dummy_log_prob = torch.zeros((state.shape[0], 1)).to(state.device)
         
-        # 2. CBF Kalkanı (Eğer A ve B matrisleri geldiyse)
-        if A is not None and B is not None:
-            # NOT: İleride A ve B matrislerini (C_safe @ A @ x) formülü ile 
-            # gerçek aerodinamik limite dönüştüreceğiz. Şimdilik sistemin 
-            # hata vermeden türev alabilmesi için dummy bir limit (1.0) veriyoruz.
-            dummy_limit = torch.ones_like(raw_action)
+        # EĞER KALKAN AKTİFSE VE MATRİSLER GELDİYSE:
+        if A is not None and B is not None and C_safe is not None and d_safe is not None:
+            # matmul kullanılır (bmm değil): C_safe (1,4,14) ile batch'lenmiş state
+            # (N,14) veya tek state (1,14) olsun, matmul broadcast ile ikisini de çözer.
             
-            # CBF Katmanı ham komutu ezer/filtreler (Gradient buradan süzülür)
-            safe_action, = self.cbf_layer(raw_action, dummy_limit)
-            return safe_action, dummy_log_prob
+            # 1. h_k (Sınıra olan mesafe) = d_safe - (C_safe @ x)
+            Cx = torch.matmul(C_safe, state.unsqueeze(-1)).squeeze(-1) # Boyut: (Batch, num_constraints)
+            h_k = d_safe - Cx 
+            
+            # 2. Dinamik İvme Limiti = Cx - (C_safe @ A @ x) + (gamma * h_k)
+            # DMD'den gelen A ve B 2D'dir; matmul C_safe'i (1,4,14) otomatik broadcast eder
+            # (bmm yerine matmul: bmm iki tarafta da 3D ister ve RuntimeError fırlatırdı)
+            CA = torch.matmul(C_safe, A)
+            CAx = torch.matmul(CA, state.unsqueeze(-1)).squeeze(-1)
+            limit = Cx - CAx + (gamma * h_k) # Boyut: (Batch, num_constraints)
+            
+            # 3. C_safe @ B
+            CB = torch.matmul(C_safe, B)
+            
+            # 4. Kalkan Çözümü (Hata Yakalama - Try/Except ile Zırhlı!)
+            # Slack sayesinde problem artık matematiksel olarak her zaman çözülebilir;
+            # try/except yalnızca çözücünün numerik uç durumlarında emniyet kemeri gibidir.
+            try:
+                safe_action, _ = self.cbf_layer(raw_action, CB, limit)
+                
+                # NaN (Infeasible) Koruması
+                if torch.isnan(safe_action).any():
+                    return raw_action, dummy_log_prob
+                    
+                return safe_action, dummy_log_prob
+                
+            except Exception:
+                # EĞER ÇÖZÜCÜ (SOLVER) MATEMATİĞİN İÇİNDEN ÇIKAMAZ VE HATA FIRLATIRSA:
+                # Oyunu çökertme! Kalkanı o saniyeliğine devreden çıkar ve ham aksiyonla devam et.
+                return raw_action, dummy_log_prob
         
-        # İlk saniyeler kalkan kapalıysa ham aksiyonu dön
+        # Kalkan aktif değilse ham aksiyon
         return raw_action, dummy_log_prob

@@ -102,8 +102,34 @@ class F16Env(gym.Env):
     def step(self, action):
         """ CBF'den filtrelenerek gelen GÜVENLİ aksiyonu simülatöre uygular """
         
+        action = np.nan_to_num(action, nan=0.0, posinf=1.0, neginf=-1.0)
+        action = np.clip(action, -1.0, 1.0)
+
         # Aksiyonları JSBSim değişkenlerine eşle
         elevator, aileron, throttle = action[0], action[1], action[2]
+        
+        # =================================================================
+        # 🛡️ AUTO-GCAS (GROUND COLLISION AVOIDANCE SYSTEM) - HARD DECK
+        # =================================================================
+        # Komutları motora yollamadan önce mevcut irtifaya bakıyoruz
+        current_alt_ft = self.sim.get_property_value('position/h-sl-ft')
+        HARD_DECK_FT = 2500.0 # Uçağın altına çekilen güvenli irtifa sınırı
+        
+        auto_gcas_penalty = 0.0
+        
+        if current_alt_ft < HARD_DECK_FT:
+            # 1. Kanatları ufka paralel hale getir (Roll = 0 kilidi)
+            aileron = 0.0  
+            
+            # 2. Burnu şiddetle havaya dik (Pitch Up - JSBSim'de negatif elevator yukarı çeker)
+            elevator = -1.0 
+            
+            # 3. Motoru kökle (Throttle Max)
+            throttle = 1.0 
+            
+            # Ajana güvenlik sınırını ihlal ettiği için caydırıcı ceza ver
+            auto_gcas_penalty = -5.0 
+        # =================================================================
         
         self.sim.set_property_value('fcs/elevator-cmd-norm', elevator)
         self.sim.set_property_value('fcs/aileron-cmd-norm', aileron)
@@ -113,6 +139,7 @@ class F16Env(gym.Env):
         self.sim.run()
         
         state = self._get_state()
+        state = np.nan_to_num(state, nan=0.0, posinf=10000.0, neginf=-10000.0)
         
         # --- 4. ÖDÜL VE BİTİŞ DURUMU (Reward & Done) ---
         # Faz 3 alt katman ajanı uçmayı (pitch/roll hedefini tutturmayı) öğrenir
@@ -121,6 +148,9 @@ class F16Env(gym.Env):
         
         # Hedef açılara ne kadar yakınsa o kadar az ceza (MSE Loss mantığı)
         reward = -1.0 * ((pitch - self.target_pitch)**2 + (roll - self.target_roll)**2)
+        
+        # Eğer Auto-GCAS devreye girdiyse ceza puanını ekle
+        reward += auto_gcas_penalty
         
         # Çakılma Kontrolü (Bariyer varken olmaması lazım ama yinede kontrol)
         done = False

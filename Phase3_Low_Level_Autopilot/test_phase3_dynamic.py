@@ -36,7 +36,7 @@ else:
     raise FileNotFoundError(f"Zırh dosyası bulunamadı: {VEC_PATH}")
 
 # 3. AKTÖRÜ YÜKLE
-actor = SafeActor(state_dim=14, action_dim=3)
+actor = SafeActor(state_dim=14, action_dim=3, num_constraints=8)
 if os.path.exists(MODEL_PATH):
     actor.load_state_dict(torch.load(MODEL_PATH))
     actor.eval() 
@@ -44,9 +44,40 @@ if os.path.exists(MODEL_PATH):
 else:
     raise FileNotFoundError(f"Model dosyası bulunamadı: {MODEL_PATH}")
 
-# 4. KALKAN SİSTEMİ
-dmd = RealTimeDMDc(state_dim=14, action_dim=3, window_size=60)
+# 4. KALKAN SİSTEMİ (DMD + CBF SINIRLARI)
+dmd = RealTimeDMDc(state_dim=14, action_dim=3, window_size=300)
 UPDATE_INTERVAL = 6
+
+# CBF kısıtlarını (ham birimler) normalize uzaya dönüştür (z-score):
+obs_mean_np = np.asarray(norm_env.obs_rms.mean, dtype=np.float32)
+obs_var_np = np.asarray(norm_env.obs_rms.var, dtype=np.float32)
+obs_std = np.sqrt(obs_var_np + 1e-8)
+
+# Hibrit CBF: 4 açı kısıtı (pitch/roll bandı) + 4 açısal hız kısıtı (q/p bandı).
+# Açılar tek adımda zayıf kontrol edilir; q/p hızları ise gerçek otoriteye sahiptir.
+C_safe_np = np.zeros((1, 8, 14), dtype=np.float32)
+C_safe_np[0, 0, 3] = 1.0   # +Pitch açısı
+C_safe_np[0, 1, 3] = -1.0  # -Pitch açısı
+C_safe_np[0, 2, 2] = 1.0   # +Roll açısı
+C_safe_np[0, 3, 2] = -1.0  # -Roll açısı
+C_safe_np[0, 4, 6] = 1.0   # +Pitch hızı q
+C_safe_np[0, 5, 6] = -1.0  # -Pitch hızı q
+C_safe_np[0, 6, 5] = 1.0   # +Roll hızı p
+C_safe_np[0, 7, 5] = -1.0  # -Roll hızı p
+
+d_safe_np = np.array([[
+    (0.52 - obs_mean_np[3]) / obs_std[3],
+    (0.52 + obs_mean_np[3]) / obs_std[3],
+    (1.05 - obs_mean_np[2]) / obs_std[2],
+    (1.05 + obs_mean_np[2]) / obs_std[2],
+    (0.35 - obs_mean_np[6]) / obs_std[6],
+    (0.35 + obs_mean_np[6]) / obs_std[6],
+    (1.0 - obs_mean_np[5]) / obs_std[5],
+    (1.0 + obs_mean_np[5]) / obs_std[5]
+]], dtype=np.float32)
+
+C_safe_tensor = torch.FloatTensor(C_safe_np)
+d_safe_tensor = torch.FloatTensor(d_safe_np)
 
 if USE_TACVIEW:
     acmi = open(TACVIEW_FILE, "w", encoding="utf-8")
@@ -65,10 +96,10 @@ raw_obs[0][12] = 0.0 # Target Pitch
 raw_obs[0][13] = 0.0 # Target Roll
 state = norm_env.normalize_obs(raw_obs)
 
-print("\n[SİSTEM] Uçak Havalandı. Sensörler ve DMD Kalkanı Kalibre Ediliyor (1 Saniye)...")
+print("\n[SİSTEM] Uçak Havalandı. Sensörler ve DMD Kalkanı Kalibre Ediliyor (5 Saniye)...")
 
-# --- 1 SANİYELİK KALİBRASYON ---
-for _ in range(60):
+# --- 5 SANİYELİK KALİBRASYON (300 ADIM) ---
+for _ in range(300):
     state_tensor = torch.FloatTensor(state)
     with torch.no_grad():
         out = actor.net(state_tensor) 
@@ -89,9 +120,14 @@ for _ in range(60):
 
 # Kalkanı ateşle
 A_numpy, B_numpy = dmd.compute_matrices()
-dynamic_limit_A = torch.FloatTensor(A_numpy)
-dynamic_limit_B = torch.FloatTensor(B_numpy)
-print("[SİSTEM] DMD Kalkanı Aktif! Kontrol Tamamen Otopilota Devrediliyor...\n")
+if A_numpy is None or B_numpy is None:
+    print("[SİSTEM] UYARI: DMD kalibrasyonu tamamlanamadı, kalkan pasif kalacak!")
+    dynamic_limit_A = None
+    dynamic_limit_B = None
+else:
+    dynamic_limit_A = torch.FloatTensor(A_numpy)
+    dynamic_limit_B = torch.FloatTensor(B_numpy)
+    print("[SİSTEM] DMD Kalkanı Aktif! Kontrol Tamamen Otopilota Devrediliyor...\n")
 
 
 # --- ASIL DİNAMİK UÇUŞ (9000 ADIM / 150 SANİYE) ---
@@ -133,14 +169,22 @@ for step in range(9000):
     # Kalkan Güncellemesi
     if step % UPDATE_INTERVAL == 0:
         A_numpy, B_numpy = dmd.compute_matrices()
-        dynamic_limit_A = torch.FloatTensor(A_numpy)
-        dynamic_limit_B = torch.FloatTensor(B_numpy)
+        if A_numpy is None or B_numpy is None:
+            dynamic_limit_A = None
+            dynamic_limit_B = None
+        else:
+            dynamic_limit_A = torch.FloatTensor(A_numpy)
+            dynamic_limit_B = torch.FloatTensor(B_numpy)
 
     state_tensor = torch.FloatTensor(state)
     
     # Ajan Kararı (Kalkanla birlikte)
     with torch.no_grad(): 
-        out = actor(state_tensor, dynamic_limit_A, dynamic_limit_B)
+        if dynamic_limit_A is not None and dynamic_limit_B is not None:
+            out = actor(state_tensor, dynamic_limit_A, dynamic_limit_B,
+                        C_safe_tensor, d_safe_tensor)
+        else:
+            out = actor.net(state_tensor)
         safe_action_tensor = out[0] if isinstance(out, tuple) else out
         action_numpy = safe_action_tensor.detach().numpy()
         action_numpy = np.clip(action_numpy, -1.0, 1.0)

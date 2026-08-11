@@ -28,20 +28,23 @@ class SafeActor(nn.Module):
         limit_param = cp.Parameter(num_constraints)          # Dinamik Limit (İvme+Mesafe)
         
         u_safe = cp.Variable(action_dim)
+        slack = cp.Variable(num_constraints)  # DMD kestirimi gürültülüyken problem hiç infeasible olmasın
         
-        # Amaç: Ajanın komutundan mümkün olduğunca az sap
-        objective = cp.Minimize(cp.sum_squares(u_safe - u_rl))
+        # Amaç: Ajanın komutundan mümkün olduğunca az sap (slack cezasi 100.0)
+        objective = cp.Minimize(cp.sum_squares(u_safe - u_rl) + 100.0 * cp.sum(slack))
         
-        # GERÇEK MATEMATİKSEL KISITLAR
+        # GERÇEK MATEMATİKSEL KISITLAR (yumuşak CBF: infeasible durumda slack devreye girer,
+        # feasible iken slack=0 ve davranış sert kısıtla birebir aynıdır)
         constraints = [
-            CB_param @ u_safe <= limit_param, # Gerçek Aerodinamik Zarf Sınırı
+            CB_param @ u_safe <= limit_param + slack, # Gerçek Aerodinamik Zarf Sınırı
+            slack >= 0.0,
             u_safe >= -1.0, 
             u_safe <= 1.0
         ] 
         
         prob = cp.Problem(objective, constraints)
         # cvxpylayers, PyTorch'tan gelen batched (yığın) tensörleri otomatik işler
-        return CvxpyLayer(prob, parameters=[u_rl, CB_param, limit_param], variables=[u_safe])
+        return CvxpyLayer(prob, parameters=[u_rl, CB_param, limit_param], variables=[u_safe, slack])
 
     def forward(self, state, A=None, B=None, C_safe=None, d_safe=None, gamma=0.1):
         """ 
@@ -52,10 +55,11 @@ class SafeActor(nn.Module):
         
         # EĞER KALKAN AKTİFSE VE MATRİSLER GELDİYSE:
         if A is not None and B is not None and C_safe is not None and d_safe is not None:
-            # PyTorch Batch (Yığın) Matris Çarpımları (bmm)
+            # matmul kullanılır (bmm değil): C_safe (1,4,14) ile batch'lenmiş state
+            # (N,14) veya tek state (1,14) olsun, matmul broadcast ile ikisini de çözer.
             
             # 1. h_k (Sınıra olan mesafe) = d_safe - (C_safe @ x)
-            Cx = torch.bmm(C_safe, state.unsqueeze(-1)).squeeze(-1) # Boyut: (Batch, num_constraints)
+            Cx = torch.matmul(C_safe, state.unsqueeze(-1)).squeeze(-1) # Boyut: (Batch, num_constraints)
             h_k = d_safe - Cx 
             
             # 2. Dinamik İvme Limiti = Cx - (C_safe @ A @ x) + (gamma * h_k)
@@ -69,8 +73,10 @@ class SafeActor(nn.Module):
             CB = torch.matmul(C_safe, B)
             
             # 4. Kalkan Çözümü (Hata Yakalama - Try/Except ile Zırhlı!)
+            # Slack sayesinde problem artık matematiksel olarak her zaman çözülebilir;
+            # try/except yalnızca çözücünün numerik uç durumlarında emniyet kemeri gibidir.
             try:
-                safe_action, = self.cbf_layer(raw_action, CB, limit)
+                safe_action, _ = self.cbf_layer(raw_action, CB, limit)
                 
                 # NaN (Infeasible) Koruması
                 if torch.isnan(safe_action).any():
