@@ -15,15 +15,15 @@ from core.jsbsim_utils import setup_flightgear_xml
 print("Test Ortamı Başlatılıyor...")
 
 
-USE_FLIGHTGEAR = True  # Canlı 3D izlemek için True (FlightGear açık olmalı)
+USE_FLIGHTGEAR = False  # Canlı 3D izlemek için True (FlightGear açık olmalı)
 USE_TACVIEW = True     # Uçuş bittiğinde .acmi dosyası oluşturmak için True
 
 
-TEST_STEP = 1800000  
+TEST_STEP = 3000000  
 
-MODEL_PATH =  f"./fighter_checkpoints/phase2_completed/sac_f16_phase2_completed_{TEST_STEP}_steps.zip" 
-VEC_PATH =  f"./fighter_checkpoints/phase2_completed/sac_f16_phase2_completed_{TEST_STEP}_steps_vec_normalize.pkl"
-TACVIEW_FILE = f"phase2_flight_{TEST_STEP}_steps.acmi"
+MODEL_PATH =  f"./fighter_checkpoints/phase2_vanilla/sac_f16_phase2_vanilla_{TEST_STEP}_steps.zip" 
+VEC_PATH =  f"./fighter_checkpoints/phase2_vanilla/sac_f16_phase2_vanilla_{TEST_STEP}_steps_vec_normalize.pkl"
+TACVIEW_FILE = f"phase2_flight_vanilla_{TEST_STEP}_steps.acmi"
 
 
 # Çevreyi kur ve eğer FlightGear aktifse XML bağla
