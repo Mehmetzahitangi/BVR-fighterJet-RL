@@ -39,7 +39,7 @@ class BVRCombatEnv(gym.Env):
         # 2. ALT BEYİN (FAZ 3 OTOPİLOTU) VE KALKAN (DMD)
         self.actor = SafeActor(state_dim=14, action_dim=3, num_constraints=4)
         actor_path = "./fighter_checkpoints/phase3_cbf/sac_actor_phase3_final.pth"
-        self.actor.load_state_dict(torch.load(actor_path))
+        self.actor.load_state_dict(torch.load(actor_path), strict=False) # log_std (Gaussian kafa) eski checkpoint'te yok
         self.actor.eval() # Alt beyni dondur
         
         self.dmd = RealTimeDMDc(state_dim=14, action_dim=3, window_size=60)
@@ -97,7 +97,7 @@ class BVRCombatEnv(gym.Env):
                     state_tensor = torch.FloatTensor(clean_state)
                     
                     with torch.no_grad():
-                        out = self.actor.net(state_tensor) 
+                        out = self.actor(state_tensor)  # eval modu: deterministik tanh(mu)
                         
                         # 2. AKSİYON KALKANI: Ağdan NaN veya Sonsuzluk gelirse 0'a çevir!
                         raw_action = out[0].detach().numpy()

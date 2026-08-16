@@ -16,10 +16,25 @@ from utils.replay_buffer import ReplayBuffer
 
 if __name__ == "__main__":
     # ==========================================
+    # 0. KOMUT SATIRI PARAMETRELERİ (duyarlılık testleri için)
+    # ==========================================
+    import argparse
+    ap = argparse.ArgumentParser(description="Phase3 CBF Korumalı SAC Eğitimi")
+    ap.add_argument("--jerk-coef", type=float, default=0.2, help="Jerk (manivela hassasiyeti) ceza katsayısı")
+    ap.add_argument("--dither-amp", type=float, default=0.2, help="DMD excitation dither genliği (tampon dolana dek)")
+    ap.add_argument("--tag", type=str, default="", help="Checkpoint/TensorBoard dizinlerine eklenecek son ek (farklı koşuları ayırmak için)")
+    ap.add_argument("--max-steps", type=int, default=None, help="Toplam eğitim adımı (varsayılan 3.000.000)")
+    args = ap.parse_args()
+
+    # ==========================================
     # 1. KLASÖR VE TENSORBOARD KURULUMU
     # ==========================================
     models_dir = "./fighter_checkpoints/phase3_cbf/"
     logs_dir = "./fighter_tensorboard/phase3_cbf/"
+    if args.tag:
+        # Tag varsa her koşu kendi alt dizininde saklanır (yanlış resume/karışma olmasın)
+        models_dir = os.path.join(models_dir, args.tag)
+        logs_dir = os.path.join(logs_dir, args.tag)
     os.makedirs(models_dir, exist_ok=True)
     os.makedirs(logs_dir, exist_ok=True)
 
@@ -28,7 +43,7 @@ if __name__ == "__main__":
     # ==========================================
     # 2. ÇEVRE VE NORMALİZASYON KURULUMU
     # ==========================================
-    base_env = F16Env()
+    base_env = F16Env(jerk_coef=args.jerk_coef)
     monitored_env = Monitor(base_env) # Ödül ve bölüm uzunluğunu izler
     vec_env = DummyVecEnv([lambda: monitored_env])
 
@@ -46,7 +61,7 @@ if __name__ == "__main__":
     def extract_steps(path):
         """ Dosya adındaki adım sayısını çıkarır: sac_actor_phase3_50000_steps.pth -> 50000 """
         try:
-            return int(os.path.basename(path).split("_")[-3])
+            return int(os.path.basename(path).split("_")[-2])
         except Exception:
             return 0
 
@@ -65,7 +80,7 @@ if __name__ == "__main__":
     GAMMA = 0.99
     TAU = 0.005
     ALPHA = 0.2
-    MAX_STEPS_TOTAL = 3000000 # Toplam adım sayısı (SB3'teki total_timesteps gibi)
+    MAX_STEPS_TOTAL = args.max_steps if args.max_steps else 3000000 # Toplam adım sayısı (SB3'teki total_timesteps gibi)
     SAVE_FREQ = 50000         # Checkpoint kayıt aralığı
 
     actor = SafeActor(state_dim=14, action_dim=3, num_constraints=8)
@@ -79,12 +94,14 @@ if __name__ == "__main__":
     # 1. Aktör (Pilot Beyni) Yüklemesi
     if actor_ckpt:
         print(f"[RESUME] Eski Aktör yükleniyor: {os.path.basename(actor_ckpt)}")
-        actor.load_state_dict(torch.load(actor_ckpt, map_location="cpu"))
+        # strict=False: eski checkpoint'lerde log_std yok, Gaussian kafanın
+        # log_std parametresi burada sıfırdan (0.0) başlar, mevcut ağırlıklar korunur.
+        actor.load_state_dict(torch.load(actor_ckpt, map_location="cpu"), strict=False)
     else:
         transfer_path = os.path.join(models_dir, "sac_actor_transferred_14_sensors.pth")
         if os.path.exists(transfer_path):
             print(f"[İNİT] Aktarım modeli yükleniyor: {os.path.basename(transfer_path)}")
-            actor.load_state_dict(torch.load(transfer_path, map_location="cpu"))
+            actor.load_state_dict(torch.load(transfer_path, map_location="cpu"), strict=False)
         else:
             print("[İNİT] Aktarım modeli bulunamadı, sıfırdan başlıyor.")
 
@@ -161,6 +178,11 @@ if __name__ == "__main__":
     state = norm_env.reset() # Dikkat: VecEnv olduğu için state shape = (1, 14)
     episode_reward = 0
     episode_length = 0
+    episode_pitch_err_sum = 0.0
+    episode_roll_err_sum = 0.0
+    episode_raw_reward_sum = 0.0
+    episode_da_sum = 0.0
+    episode_da_steps = 0
     episodes_completed = 0
     crash_count = 0
 
@@ -199,9 +221,17 @@ if __name__ == "__main__":
                     out = actor(state_tensor, dynamic_limit_A, dynamic_limit_B,
                                 C_safe_tensor, d_safe_tensor)
                     shield_ok = 1.0
+                    # Δa TELEMETRİSİ: kalkan aktifken ham (kalkansız) aksiyon da alınır; fark =
+                    # kalkanın komutu ne kadar düzelttiği (eğitimde kalkan kavgası ölçüsü).
+                    # Stokastik kafa ikinci çağrıda taze gürültü örnekler; bölüm ortalamasında
+                    # sıfır-ortalamalı olduğundan trend metriği olarak geçerlidir.
+                    raw_out = actor(state_tensor)
+                    raw_action = raw_out[0] if isinstance(raw_out, tuple) else raw_out
                 else:
                     # İlk saniyeler, kalkan yok, ham sinir ağı devrede
-                    out = actor.net(state_tensor)
+                    # (Gaussian kafa: keşif için stokastik örnekleme yapılır)
+                    out = actor(state_tensor)
+                    raw_action = None
 
                 # Modelin çıktısı tuple (action, log_prob) ise 0. indexi al,
                 # tek bir tensör ise direkt tensörün kendisini al. (Kurşun Geçirmez Mantık)
@@ -209,10 +239,34 @@ if __name__ == "__main__":
 
             action_numpy = safe_action_tensor.detach().numpy() # Shape = (1, 3)
 
+            shield_da = 0.0
+            if shield_ok:
+                # Test dosyalarındaki formülün birebir aynısı (L2 normu)
+                shield_da = float(np.linalg.norm(action_numpy[0] - raw_action.detach().numpy()[0]))
+
+            # DMD UYARMA (EXCITATION): Tampon dolana dek (ilk ~300 adım) aksiyona küçük
+            # rastgele gürültü eklenir. Kalibrasyonda aksiyon çeşitliliği az olursa
+            # DMD B matrisi söner (B->0) ve CBF kalkanı "şeffaf" kalır (her aksiyonu
+            # geçirir); bu dither kontrol efektini görünür kılarak kalkana otorite verir.
+            if not dmd.is_ready:
+                dither = np.random.uniform(-args.dither_amp, args.dither_amp, size=action_numpy.shape).astype(np.float32)
+                action_numpy = np.clip(action_numpy + dither, -1.0, 1.0)
+
             # --- C) SİMÜLASYON ADIMI ---
+            ret_before = norm_env.get_original_reward()[0] if hasattr(norm_env, 'get_original_reward') else None
             next_state, reward, done, info = norm_env.step(action_numpy)
+            if ret_before is not None:
+                # RAW bölüm ödülü (normalize değil): get_original_reward() discounted return
+                # döndürür; adımın ham ödülü = ret_after - gamma * ret_before (birebir doğru)
+                ret_after = norm_env.get_original_reward()[0]
+                episode_raw_reward_sum += (ret_after - norm_env.gamma * ret_before)
+            if shield_ok:
+                episode_da_sum += shield_da
+                episode_da_steps += 1
             episode_reward += reward[0] # VecEnv array döndürdüğü için index 0
             episode_length += 1
+            episode_pitch_err_sum += abs(state[0][3] - state[0][12])
+            episode_roll_err_sum += abs(state[0][2] - state[0][13])
 
             # DMD ve Hafızaya veri ekleme (Index 0 ile batch boyutunu kırıyoruz)
             # NOT: Kalkan kapalıyken bile hafızaya yazıyoruz (veri kaybı yok).
@@ -249,10 +303,9 @@ if __name__ == "__main__":
                         target_value[valid_mask] = rewards[valid_mask] + GAMMA * (1 - dones[valid_mask]) * target_Q_v
 
                     if (~valid_mask).any():
-                        next_actions_i = actor.net(next_states[~valid_mask])
-                        dummy_log_prob_i = torch.zeros((next_actions_i.shape[0], 1))
+                        next_actions_i, next_log_probs_i = actor(next_states[~valid_mask])
                         target_Q1_i, target_Q2_i = critic_target(next_states[~valid_mask], next_actions_i)
-                        target_Q_i = torch.min(target_Q1_i, target_Q2_i) - ALPHA * dummy_log_prob_i
+                        target_Q_i = torch.min(target_Q1_i, target_Q2_i) - ALPHA * next_log_probs_i
                         target_value[~valid_mask] = rewards[~valid_mask] + GAMMA * (1 - dones[~valid_mask]) * target_Q_i
 
                 current_Q1, current_Q2 = critic(states, actions)
@@ -274,10 +327,10 @@ if __name__ == "__main__":
                     actor_loss = actor_loss + (ALPHA * log_probs_v - Q_pred_v).mean() * (valid_mask.sum().float() / BATCH_SIZE)
 
                 if (~valid_mask).any():
-                    raw_actions_i = actor.net(states[~valid_mask])
+                    raw_actions_i, log_probs_i = actor(states[~valid_mask])
                     Q1_pred_i, Q2_pred_i = critic(states[~valid_mask], raw_actions_i)
                     Q_pred_i = torch.min(Q1_pred_i, Q2_pred_i)
-                    actor_loss = actor_loss + (-Q_pred_i).mean() * ((~valid_mask).sum().float() / BATCH_SIZE)
+                    actor_loss = actor_loss + (ALPHA * log_probs_i - Q_pred_i).mean() * ((~valid_mask).sum().float() / BATCH_SIZE)
 
                 actor_optimizer.zero_grad()
                 actor_loss.backward()
@@ -295,9 +348,14 @@ if __name__ == "__main__":
                     # Q-Değerlerinin sağlığı (Critic ne kadar ceza bekliyor?)
                     writer.add_scalar("Q_Values/Q_Pred_Mean", Q_pred_v.mean().item() if valid_mask.any() else 0.0, total_steps)
 
-                    # Ajanın hareketlilik seviyesi (Log Prob)
+                    # Ajanın hareketlilik seviyesi (Gerçek SAC Entropisi)
+                    entropy_sum = 0.0
                     if valid_mask.any():
-                        writer.add_scalar("Action_Stats/Log_Prob", log_probs_v.mean().item(), total_steps)
+                        entropy_sum += -log_probs_v.mean().item() * (valid_mask.sum().float() / BATCH_SIZE)
+                        writer.add_scalar("Action_Stats/Log_Prob_Valid", log_probs_v.mean().item(), total_steps)
+                    if (~valid_mask).any():
+                        entropy_sum += -log_probs_i.mean().item() * ((~valid_mask).sum().float() / BATCH_SIZE)
+                    writer.add_scalar("Action_Stats/Entropy", entropy_sum, total_steps)
 
             # --- E) BÖLÜM (EPISODE) SONU İŞLEMLERİ ---
             # Ya uçak çakılırsa, ya da 2500 adımı devirirse bölüm bitsin
@@ -314,19 +372,29 @@ if __name__ == "__main__":
                 final_mach = state[0][1]
 
                 # --- TENSORBOARD: UÇUŞ PERFORMANSI ---
+                writer.add_scalar("Rollout/0_Raw_Episode_Reward", episode_raw_reward_sum, total_steps)
                 writer.add_scalar("Rollout/1_Episode_Reward", raw_reward, total_steps)
                 writer.add_scalar("Rollout/2_Episode_Length", episode_length, total_steps)
                 writer.add_scalar("Safety/Crash_Count", crash_count, total_steps)
+                writer.add_scalar("Safety/Shield_Da_Mean", episode_da_sum / episode_da_steps if episode_da_steps else 0.0, total_steps)
 
                 writer.add_scalar("Aerodynamics/Final_Mach", final_mach, total_steps)
                 writer.add_scalar("Aerodynamics/Pitch_Error_Rad", final_pitch_error, total_steps)
                 writer.add_scalar("Aerodynamics/Roll_Error_Rad", final_roll_error, total_steps)
+                writer.add_scalar("Aerodynamics/Pitch_Error_Mean_Rad", episode_pitch_err_sum / episode_length, total_steps)
+                writer.add_scalar("Aerodynamics/Roll_Error_Mean_Rad", episode_roll_err_sum / episode_length, total_steps)
 
-                print(f"Bölüm: {episodes_completed} | Adım: {total_steps} | Ödül: {raw_reward:.1f} | Pitch Hata: {final_pitch_error:.2f} | Roll Hata: {final_roll_error:.2f}")
+                da_mean = episode_da_sum / episode_da_steps if episode_da_steps else 0.0
+                print(f"Bölüm: {episodes_completed} | Adım: {total_steps} | Ödül: {raw_reward:.1f} | Raw: {episode_raw_reward_sum:.1f} | Δa: {da_mean:.2f} | Pitch Hata: {final_pitch_error:.2f} | Roll Hata: {final_roll_error:.2f}")
 
                 state = norm_env.reset()
                 episode_reward = 0
                 episode_length = 0
+                episode_pitch_err_sum = 0.0
+                episode_roll_err_sum = 0.0
+                episode_raw_reward_sum = 0.0
+                episode_da_sum = 0.0
+                episode_da_steps = 0
             else:
                 state = next_state
 

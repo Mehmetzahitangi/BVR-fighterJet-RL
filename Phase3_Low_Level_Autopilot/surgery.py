@@ -23,7 +23,7 @@ def perform_network_surgery():
 
     # 2. YENİ MODELİ OLUŞTUR (14 Sensörlü ve CBF Kalkanlı yeni yapımız)
     print("2. Yeni beyin iskeleti (14 Boyutlu SafeActor) hazırlanıyor...")
-    new_actor = SafeActor(state_dim=14, action_dim=3)
+    new_actor = SafeActor(state_dim=14, action_dim=3, num_constraints=8)
     new_actor_dict = new_actor.state_dict()
 
     # 3. SİNİR KATMANLARINI EŞLEŞTİRME (Mapping)

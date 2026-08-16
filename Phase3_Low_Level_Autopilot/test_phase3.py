@@ -18,9 +18,12 @@ print("Faz 3 (CBF Kalkanlı) Test Ortamı Başlatılıyor...")
 USE_FLIGHTGEAR = False  
 USE_TACVIEW = True      
 
-MODEL_PATH = "./fighter_checkpoints/phase3_cbf/sac_actor_phase3_final.pth" 
-VEC_PATH = "./fighter_checkpoints/phase3_cbf/sac_env_phase3_final_vec_normalize.pkl"
-TACVIEW_FILE = "phase3_flight_cbf_final.acmi"
+# DMD excitation dither genliği (duyarlılık testleri için dışarıdan verilebilir)
+DITHER_AMP = float(os.environ.get("DITHER_AMP", "0.2"))
+
+MODEL_PATH = "./fighter_checkpoints/phase3_cbf/sac_actor_phase3_104981_steps.pth" 
+VEC_PATH = "./fighter_checkpoints/phase3_cbf/sac_env_phase3_104981_steps_vec_normalize.pkl"
+TACVIEW_FILE = "phase3_flight_cbf_104981.acmi"
 
 # 1. ÇEVREYİ KUR
 base_env = F16Env()
@@ -90,23 +93,64 @@ if USE_TACVIEW:
 # TEST DÖNGÜSÜ BAŞLIYOR
 # ==========================================
 state = norm_env.reset()
+
+# --- KALİBRASYON HEDEF KİLİDİ: env hedefleri rastgele üretir; kalibrasyon düz uçuşta
+# yapılır ki DMD temiz veri toplasın ve kalibrasyon sırasında uçak riskli manevra yapmasın ---
+base_env.target_pitch = 0.0
+base_env.target_roll = 0.0
+raw_obs = norm_env.get_original_obs().copy()
+raw_obs[0][12] = 0.0 # Target Pitch
+raw_obs[0][13] = 0.0 # Target Roll
+state = norm_env.normalize_obs(raw_obs)
+
 print("\n[SİSTEM] Uçak Havalandı. Sensörler ve DMD Kalkanı Kalibre Ediliyor (5 Saniye)...")
 
 
 # --- 5 SANİYELİK KALİBRASYON (SİSTEM TANIMA / DMD - 300 ADIM) ---
-for _ in range(300):
-    state_tensor = torch.FloatTensor(state)
-    
-    # Ajanın ham (kalkansız) beyni uçağı hafifçe uçursun ki DMD veri toplasın!
-    with torch.no_grad():
-        out = actor.net(state_tensor) 
-        safe_action_tensor = out[0] if isinstance(out, tuple) else out
-        action_numpy = safe_action_tensor.detach().numpy()
-        action_numpy = np.clip(action_numpy, -1.0, 1.0)
+# ÇIKMAZ KORUMASI: Kalibrasyon sırasında kaza olursa çevre + DMD tamponu
+# sıfırlanıp kalibrasyon yeniden başlatılır (çakılmış uçakla teste girilmez).
+kalibrasyon_tamam = False
+while not kalibrasyon_tamam:
+    kalibrasyon_ok = True
+    for _ in range(300):
+        state_tensor = torch.FloatTensor(state)
         
-    next_state, reward, done, info = norm_env.step(action_numpy)
-    dmd.add_data(state[0], action_numpy[0], next_state[0])
-    state = next_state
+        # Ajanın ham (kalkansız) beyni uçağı hafifçe uçursun ki DMD veri toplasın!
+        with torch.no_grad():
+            out = actor(state_tensor) 
+            safe_action_tensor = out[0] if isinstance(out, tuple) else out
+            action_numpy = safe_action_tensor.detach().numpy()
+            # DMD UYARMA (EXCITATION): aksiyona küçük gürültü ekle ki B matrisi
+            # sönmesin (B->0 olursa kalkan şeffaf kalır, her aksiyonu geçirir)
+            action_numpy = np.clip(action_numpy + np.random.uniform(-DITHER_AMP, DITHER_AMP, size=action_numpy.shape), -1.0, 1.0)
+            
+        next_state, reward, done, info = norm_env.step(action_numpy)
+        
+        # Hedefi zorla 0.0 tut (DMD temiz veri toplasın)
+        raw_obs = norm_env.get_original_obs().copy()
+        raw_obs[0][12] = 0.0
+        raw_obs[0][13] = 0.0
+        next_state = norm_env.normalize_obs(raw_obs)
+        
+        dmd.add_data(state[0], action_numpy[0], next_state[0])
+        state = next_state
+
+        if done[0]:
+            print("[SİSTEM] Kalibrasyon sırasında kaza! Çevre sıfırlanıp yeniden başlatılıyor...")
+            kalibrasyon_ok = False
+            break
+
+    if kalibrasyon_ok:
+        kalibrasyon_tamam = True
+    else:
+        state = norm_env.reset()
+        base_env.target_pitch = 0.0
+        base_env.target_roll = 0.0
+        raw_obs = norm_env.get_original_obs().copy()
+        raw_obs[0][12] = 0.0
+        raw_obs[0][13] = 0.0
+        state = norm_env.normalize_obs(raw_obs)
+        dmd = RealTimeDMDc(state_dim=14, action_dim=3, window_size=300)
 
 # Kalkan ilk kez ateşleniyor
 A_numpy, B_numpy = dmd.compute_matrices()
@@ -135,19 +179,23 @@ for step in range(9000):
 
     state_tensor = torch.FloatTensor(state)
     
-    # Ajan Kararı (Kalkan Artık Hep Devrede!)
+
+    # Ajan Kararı (Kalkanla birlikte)
     with torch.no_grad(): 
         if dynamic_limit_A is not None and dynamic_limit_B is not None:
             out = actor(state_tensor, dynamic_limit_A, dynamic_limit_B,
                         C_safe_tensor, d_safe_tensor)
         else:
-            out = actor.net(state_tensor)
+            out = actor(state_tensor)
+        
         safe_action_tensor = out[0] if isinstance(out, tuple) else out
         action_numpy = safe_action_tensor.detach().numpy()
-        action_numpy = np.clip(action_numpy, -1.0, 1.0) # Ekstra güvenlik kilitleri
+        action_numpy = np.clip(action_numpy, -1.0, 1.0)
 
-    # Simülasyon Adımı
+    # Simülasyon Adımı (Artık kendi içinde DOĞRU hedefle observation üretecek)
     next_state, reward, done, info = norm_env.step(action_numpy)
+    
+    # Korsan müdahaleyi SİLDİK. DMD artık gerçek fizikle besleniyor.
     dmd.add_data(state[0], action_numpy[0], next_state[0])
 
     # GERÇEK ZAMANLI TELEMETRİ OKUMALARI
@@ -180,10 +228,21 @@ for step in range(9000):
     if USE_FLIGHTGEAR:
         time.sleep(1.0 / 60.0)
         
-    # EKRANA BİLGİ BAS (Her yarım saniyede bir)
+    # EKRANA BİLGİ BAS (Her yarım saniyede bir) + KALKAN TELEMETRİSİ
     if step % 30 == 0:
         mach = fdm.get_property_value('velocities/mach')
-        print(f"Süre: {step/60:.1f}s | Mach: {mach:.2f} | PITCH: {mevcut_pitch_deg:5.1f}° -> Hedef: {hedef_pitch_deg:5.1f}° | ROLL: {mevcut_roll_deg:5.1f}° -> Hedef: {hedef_roll_deg:5.1f}°")
+        # KALKAN TELEMETRİSİ: B matrisi canlı mı ve kalkan aksiyonu gerçekten değiştiriyor mu?
+        # (Bmax~0 ise kalkan şeffaftır: zarf korumaz. Δa>0 ise kalkan müdahale ediyor demektir.)
+        if dynamic_limit_B is not None:
+            b_amp = float(np.abs(B_numpy).max())
+            with torch.no_grad():
+                out_raw = actor(state_tensor)
+                raw_action_np = (out_raw[0] if isinstance(out_raw, tuple) else out_raw).detach().numpy()
+                kalkan_duzeltme = float(np.linalg.norm(action_numpy[0] - raw_action_np[0]))
+            kalkan_msj = f"Kalkan: Bmax={b_amp:.3f} | Δa={kalkan_duzeltme:.3f}"
+        else:
+            kalkan_msj = "Kalkan: PASİF"
+        print(f"Süre: {step/60:.1f}s | Mach: {mach:.2f} | PITCH: {mevcut_pitch_deg:5.1f}° -> Hedef: {hedef_pitch_deg:5.1f}° | ROLL: {mevcut_roll_deg:5.1f}° -> Hedef: {hedef_roll_deg:5.1f}° | {kalkan_msj}")
 
     if done[0]:
         print(f"\nUçuş {step/60:.1f} saniye sonra sonlandı!")
